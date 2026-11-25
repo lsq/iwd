@@ -20,6 +20,7 @@
  *
  */
 
+#include <stdbool.h>
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
@@ -48,6 +49,9 @@ static struct l_genl_family *nl80211 = NULL;
 static char **whitelist_filter;
 static char **blacklist_filter;
 static bool randomize;
+static void manager_interface_dump_callback(struct l_genl_msg *msg,
+						void *user_data);
+static void manager_filtered_interface_dump_done(void *user_data);
 static bool use_default;
 static unsigned int config_watch;
 
@@ -57,6 +61,7 @@ struct wiphy_setup_state {
 	unsigned int pending_cmd_count;
 	bool aborted;
 	bool retry;
+	bool create_tried; /* 防止永久失败时反复发 NEW_INTERFACE */
 
 	/*
 	 * Data we may need if the driver does not seem to support interface
@@ -86,6 +91,9 @@ static void wiphy_setup_state_destroy(struct wiphy_setup_state *state)
 	wiphy_setup_state_free(state);
 }
 
+static bool manager_create_interface(struct wiphy_setup_state *state,
+					const char *ifname, uint32_t iftype);
+
 static bool manager_use_default(struct wiphy_setup_state *state)
 {
 	uint8_t addr_buf[6];
@@ -97,6 +105,25 @@ static bool manager_use_default(struct wiphy_setup_state *state)
 	if (!state->default_interfaces) {
 		l_error("No default interface for wiphy %u",
 			(unsigned int) state->id);
+		
+		/*
+		 * If the whitelist contains a literal interface name, the
+		 * interface may have been deleted before we started (e.g.
+		 * a SOCKET_OWNER interface removed when a previous iwd
+		 * instance exited) and no NEW_INTERFACE event will ever
+		 * arrive to trigger the retry.  Try creating it once
+		 * instead of waiting forever.
+		 */
+		if (!state->create_tried && whitelist_filter &&
+				whitelist_filter[0] &&
+				!strpbrk(whitelist_filter[0], "*?[")) {
+			state->create_tried = true;
+
+			if (manager_create_interface(state,
+						whitelist_filter[0],
+						NL80211_IFTYPE_STATION))
+				return false;
+		}
 		state->retry = true;
 		return false;
 	}
@@ -114,7 +141,22 @@ static bool manager_use_default(struct wiphy_setup_state *state)
 		entry = entry->next;
 	}
 
+	state->retry = false; //  找到接口了，不再需要等事件重试
 	return true;
+}
+
+static void manager_interface_redump(struct wiphy_setup_state *state)
+{
+	struct l_genl_msg *msg;
+
+	msg = l_genl_msg_new(NL80211_CMD_GET_INTERFACE);
+	l_genl_msg_append_attr(msg, NL80211_ATTR_WIPHY, 4, &state->id);
+
+	if (!l_genl_family_dump(nl80211, msg,
+				manager_interface_dump_callback,
+				state, manager_filtered_interface_dump_done))
+		l_error("Could not re-dump interfaces for wiphy %u",
+							state->id);
 }
 
 static void manager_new_station_interface_cb(struct l_genl_msg *msg,
@@ -151,6 +193,18 @@ static void manager_new_station_interface_cb(struct l_genl_msg *msg,
 		 * will have successfully deleted any default interface
 		 * there may have been.
 		 */
+
+				/*
+		 * Creation failed for another reason.  When using the
+		 * default interface (e.g. an interface whitelist was
+		 * given), the most likely cause is that the interface
+		 * appeared between our initial dump and this command —
+		 * e.g. the name now exists (EINVAL/EEXIST).  Re-dump the
+		 * interfaces to pick it up instead of waiting for a
+		 * NEW_INTERFACE event that may never arrive.
+		 */
+		if (state->use_default)
+			manager_interface_redump(state);
 		return;
 	}
 
@@ -192,6 +246,45 @@ static void manager_new_interface_done(void *user_data)
 		wiphy_setup_state_destroy(state);
 }
 
+static bool manager_create_interface(struct wiphy_setup_state *state,
+					const char *ifname, uint32_t iftype)
+{
+	struct l_genl_msg *msg;
+	unsigned int cmd_id;
+
+	if (!wiphy_supports_iftype(state->wiphy, iftype))
+		return false;
+
+	msg = l_genl_msg_new(NL80211_CMD_NEW_INTERFACE);
+	l_genl_msg_append_attr(msg, NL80211_ATTR_WIPHY, 4, &state->id);
+	l_genl_msg_append_attr(msg, NL80211_ATTR_IFTYPE, 4, &iftype);
+	l_genl_msg_append_attr(msg, NL80211_ATTR_IFNAME,
+				strlen(ifname) + 1, ifname);
+	l_genl_msg_append_attr(msg, NL80211_ATTR_4ADDR, 1, "\0");
+	l_genl_msg_append_attr(msg, NL80211_ATTR_SOCKET_OWNER, 0, "");
+
+	if (randomize && wiphy_has_feature(state->wiphy,
+					NL80211_FEATURE_MAC_ON_CREATE)) {
+		uint8_t random_addr[6];
+
+		wiphy_generate_random_address(state->wiphy, random_addr);
+		l_debug("Creating interface on phy: %s with random addr: "MAC,
+				wiphy_get_name(state->wiphy), MAC_STR(random_addr));
+		l_genl_msg_append_attr(msg, NL80211_ATTR_MAC, 6, random_addr);
+	}
+
+	cmd_id = l_genl_family_send(nl80211, msg,
+					manager_new_station_interface_cb, state,
+					manager_new_interface_done);
+	if (!cmd_id) {
+		l_error("Error sending NEW_INTERFACE for %s", ifname);
+		return false;
+	}
+
+	state->pending_cmd_count++;
+	return true;
+}
+
 static void manager_create_interfaces(struct wiphy_setup_state *state)
 {
 	struct l_genl_msg *msg;
@@ -225,35 +318,7 @@ static void manager_create_interfaces(struct wiphy_setup_state *state)
 	l_debug("creating %s", ifname);
 	iftype = NL80211_IFTYPE_STATION;
 
-	msg = l_genl_msg_new(NL80211_CMD_NEW_INTERFACE);
-	l_genl_msg_append_attr(msg, NL80211_ATTR_WIPHY, 4, &state->id);
-	l_genl_msg_append_attr(msg, NL80211_ATTR_IFTYPE, 4, &iftype);
-	l_genl_msg_append_attr(msg, NL80211_ATTR_IFNAME,
-				strlen(ifname) + 1, ifname);
-	l_genl_msg_append_attr(msg, NL80211_ATTR_4ADDR, 1, "\0");
-	l_genl_msg_append_attr(msg, NL80211_ATTR_SOCKET_OWNER, 0, "");
-
-	if (randomize && wiphy_has_feature(state->wiphy,
-					NL80211_FEATURE_MAC_ON_CREATE)) {
-		uint8_t random_addr[6];
-
-		wiphy_generate_random_address(state->wiphy, random_addr);
-		l_debug("Creating interface on phy: %s with random addr: "MAC,
-						wiphy_get_name(state->wiphy),
-						MAC_STR(random_addr));
-		l_genl_msg_append_attr(msg, NL80211_ATTR_MAC, 6, random_addr);
-	}
-
-	cmd_id = l_genl_family_send(nl80211, msg,
-					manager_new_station_interface_cb, state,
-					manager_new_interface_done);
-
-	if (!cmd_id) {
-		l_error("Error sending NEW_INTERFACE for %s", ifname);
-		return;
-	}
-
-	state->pending_cmd_count++;
+	manager_create_interface(state, ifname, iftype);
 
 try_create_p2p:
 	/*
