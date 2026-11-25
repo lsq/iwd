@@ -123,6 +123,12 @@ The group ``[Settings]`` contains general settings.
      - Values: **true**, false
 
        Whether the network can be connected to automatically
+   * - Priority
+     - Values: signed integer (default: **0**)
+
+       Autoconnect priority.  Known networks with a higher priority are
+       preferred for autoconnect.  Networks with equal priority are
+       ordered by last connected time.
    * - Hidden
      - Values: true, **false**
 

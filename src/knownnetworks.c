@@ -59,6 +59,7 @@ void __network_config_parse(const struct l_settings *settings,
 					struct network_config *config)
 {
 	bool b;
+	int i;
 	const char *value;
 	uint8_t new_addr[6];
 
@@ -71,6 +72,16 @@ void __network_config_parse(const struct l_settings *settings,
 		b = true;
 
 	config->is_autoconnectable = b;
+
+	if (!l_settings_get_int(settings, NET_PRIORITY, &i))
+		i = 0;
+ 
+	if (i > 255)
+		i = 255;
+	else if (i < -255)
+		i = -255;
+
+	config->priority = i;
 
 	if (!l_settings_get_bool(settings, NET_HIDDEN, &b))
 		b = false;
@@ -176,6 +187,25 @@ static int connected_time_compare(const void *a, const void *b, void *user_data)
 	return 0;
 }
 
+static int known_network_compare(const void *a, const void *b, void *user_data)
+{
+	const struct network_info *ni_a = a;
+	const struct network_info *ni_b = b;
+	uint64_t ta = ni_a->config.connected_time;
+	uint64_t tb = ni_b->config.connected_time;
+
+	/* Higher priority sorts first */
+	if (ni_a->config.priority != ni_b->config.priority)
+		return ni_b->config.priority - ni_a->config.priority;
+
+	if (l_time_after(ta, tb))
+		return -1;
+	else if (l_time_before(ta, tb))
+		return 1;
+
+	return 0;
+}
+
 static const char *known_network_get_path(const struct network_info *network)
 {
 	static char path[256];
@@ -248,6 +278,21 @@ static void known_network_set_autoconnect(struct network_info *network,
 
 	l_dbus_property_changed(dbus_get_bus(), known_network_get_path(network),
 				IWD_KNOWN_NETWORK_INTERFACE, "AutoConnect");
+}
+
+static void known_network_set_priority(struct network_info *network,
+						int32_t priority)
+{
+	if (network->config.priority == priority)
+		return;
+
+	network->config.priority = priority;
+
+	l_queue_remove(known_networks, network);
+	l_queue_insert(known_networks, network, known_network_compare, NULL);
+
+	l_dbus_property_changed(dbus_get_bus(), known_network_get_path(network),
+				IWD_KNOWN_NETWORK_INTERFACE, "Priority");
 }
 
 static int known_network_touch(struct network_info *info)
@@ -453,7 +498,7 @@ void known_network_set_connected_time(struct network_info *network,
 				"LastConnectedTime");
 
 	l_queue_remove(known_networks, network);
-	l_queue_insert(known_networks, network, connected_time_compare, NULL);
+	l_queue_insert(known_networks, network, known_network_compare, NULL);
 }
 
 void known_network_update(struct network_info *network,
@@ -484,6 +529,7 @@ void known_network_update(struct network_info *network,
 	WATCHLIST_NOTIFY(&known_network_watches,
 				known_networks_watch_func_t,
 				KNOWN_NETWORKS_EVENT_UPDATED, network);
+	known_network_set_priority(network, new->priority);
 }
 
 bool known_networks_foreach(known_networks_foreach_func_t function,
@@ -673,6 +719,52 @@ static bool known_network_property_get_autoconnect(struct l_dbus *dbus,
 	return true;
 }
 
+static bool known_network_property_get_priority(struct l_dbus *dbus,
+					struct l_dbus_message *message,
+					struct l_dbus_message_builder *builder,
+					void *user_data)
+{
+	struct network_info *network = user_data;
+	int32_t priority = network->config.priority;
+
+	l_dbus_message_builder_append_basic(builder, 'i', &priority);
+
+	return true;
+}
+
+static struct l_dbus_message *known_network_property_set_priority(
+					struct l_dbus *dbus,
+					struct l_dbus_message *message,
+					struct l_dbus_message_iter *new_value,
+					l_dbus_property_complete_cb_t complete,
+					void *user_data)
+{
+	struct network_info *network = user_data;
+	struct l_settings *settings;
+	int32_t priority;
+
+	if (!l_dbus_message_iter_get_variant(new_value, "i", &priority))
+		return dbus_error_invalid_args(message);
+
+	if (network->config.priority == priority)
+		return l_dbus_message_new_method_return(message);
+
+	settings = network->ops->open(network);
+	if (!settings)
+		return dbus_error_failed(message);
+
+	l_settings_set_int(settings, NET_PRIORITY, priority);
+
+	network->ops->sync(network, settings);
+	l_settings_free(settings);
+
+	/* 文件 watch 会触发 known_network_update 完成重排，
+	 * 但立即更新可保证 D-Bus 客户端马上看到一致状态 */
+	known_network_set_priority(network, priority);
+
+	return l_dbus_message_new_method_return(message);
+}
+
 static struct l_dbus_message *known_network_property_set_autoconnect(
 					struct l_dbus *dbus,
 					struct l_dbus_message *message,
@@ -740,6 +832,9 @@ static void setup_known_network_interface(struct l_dbus_interface *interface)
 	l_dbus_interface_property(interface, "AutoConnect", 0, "b",
 					known_network_property_get_autoconnect,
 					known_network_property_set_autoconnect);
+	l_dbus_interface_property(interface, "Priority", 0, "i",
+				known_network_property_get_priority,
+				known_network_property_set_priority);
 	l_dbus_interface_property(interface, "LastConnectedTime", 0, "s",
 				known_network_property_get_last_connected,
 				NULL);
@@ -771,7 +866,7 @@ void known_networks_remove(struct network_info *network)
 
 void known_networks_add(struct network_info *network)
 {
-	l_queue_insert(known_networks, network, connected_time_compare, NULL);
+	l_queue_insert(known_networks, network, known_network_compare, NULL);
 	known_network_register_dbus(network);
 
 	WATCHLIST_NOTIFY(&known_network_watches,

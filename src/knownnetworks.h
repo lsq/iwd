@@ -30,6 +30,7 @@
 #define NET_TRANSITION_DISABLE SETTINGS, "TransitionDisable"
 #define NET_TRANSITION_DISABLE_MODES SETTINGS, "DisabledTransitionModes"
 #define NET_USE_DEFAULT_ECC_GROUP SETTINGS, "UseDefaultEccGroup"
+#define NET_PRIORITY SETTINGS, "Priority"
 
 enum security;
 struct scan_freq_set;
@@ -74,6 +75,7 @@ struct network_info_ops {
 
 struct network_config {
 	uint64_t connected_time;	/* Time last connected */
+	int32_t priority;		/* Autoconnect priority, higher = preferred */
 	bool is_hidden:1;
 	bool is_autoconnectable:1;
 	bool override_addr:1;

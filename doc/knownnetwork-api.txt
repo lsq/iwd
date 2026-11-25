@@ -46,3 +46,12 @@ Properties	string Name [readonly]
 			from being considered as a candidate for the automatic
 			connection when its BSSIDs are observed in the scan
 			results. The default value is True.
+		integer Priority [readwrite]
+
+		       Autoconnect priority.  Known networks with a higher priority are
+		       preferred for autoconnect.  Networks with equal priority are
+		       ordered by last connected time.
+
+		       Priority 大的网络在 known_networks 队列中靠前 → known_network_offset 返回更小的 n → util_exponential_decay(n) 衰减更少 → network->rank 更高 → station_autoconnect_next 优先尝试。
+			同优先级时仍按 LastConnectedTime 排序，完全向后兼容（默认 0 时行为与现在一致）。
+			注意 priority 只影响"已连接过的网络"组内排序；network_rank_update 中"当前连接 > 连过的 > 未连过的 > 未知"四个大组的分层不变 network.c:1974-1984 。若希望 priority 能跨组生效（例如让从未连过但预置了 priority 的网络排在已连过的之前），则需要在 network_rank_update 中额外加 priority 偏移量，而不是只改比较函数——这一点取决于你的需求语义。

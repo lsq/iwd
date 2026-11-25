@@ -386,6 +386,16 @@ autoconnect purposes.
        decrease exponentially. Setting this can have very drastic effects on the
        BSS rank if its station count is high, use with care.
 
+   * - StrictPriorityOrder
+     - Values: true, **false**
+
+       When enabled, known networks are ordered strictly by the
+       per-network ``Priority`` setting (see iwd.network(5)) for
+       autoconnect, ignoring BSS signal strength and security
+       factors.  Networks with equal priority are ordered by last
+       connected time.  When disabled (default), priority only
+       affects ordering and signal strength may still dominate.
+
 Scan
 ----
 

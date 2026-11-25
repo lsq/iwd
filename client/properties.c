@@ -31,6 +31,24 @@
 const char *properties_on_off_opts[3] = { "on", "off", NULL };
 const char *properties_yes_no_opts[3] = { "yes", "no", NULL };
 
+bool properties_builder_append_int_variant(
+					struct l_dbus_message_builder *builder,
+					const char *value_str)
+{
+	int32_t value;
+	char *end;
+
+	if (!builder || !value_str)
+		return false;
+
+	errno = 0;
+	value = strtol(value_str, &end, 10);
+	if (errno || *end != '\0')
+		return false;
+
+	return l_dbus_message_builder_append_basic(builder, 'i', &value);
+}
+
 bool properties_builder_append_on_off_variant(
 					struct l_dbus_message_builder *builder,
 					const char *value_str)

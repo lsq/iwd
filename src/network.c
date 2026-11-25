@@ -63,6 +63,7 @@
 
 static uint32_t known_networks_watch;
 static uint32_t event_watch;
+static bool strict_priority_order;
 
 struct network {
 	char ssid[SSID_MAX_SIZE + 1];
@@ -1998,6 +1999,18 @@ void network_rank_update(struct network *network, bool connected)
 
 		L_WARN_ON(n < 0);
 
+		if (strict_priority_order) {
+			/*
+			 * Strict mode: priority 决定层级，每层间隔
+			 * USHRT_MAX+1，同层内用 connected_time 衰减
+			 * 做 tie-break，完全忽略 bss_rank（信号强度）。
+			 */
+			network->rank = USHRT_MAX +
+				info->config.priority * (USHRT_MAX + 1) +
+				(int) (util_exponential_decay(n) * USHRT_MAX);
+			return;	/* 跳过后面的 RSNE/WPA/Open 安全因子，
+				 * 否则 Open 网络乘 0.5 会破坏严格分层 */
+		}
 		network->rank =
 			util_exponential_decay(n) * best_bss->rank + USHRT_MAX;
 	} else
@@ -2206,6 +2219,11 @@ static void setup_bss_interface(struct l_dbus_interface *interface)
 
 static int network_init(void)
 {
+	const struct l_settings *config = iwd_get_config();
+
+	if (!l_settings_get_bool(config, "Rank", "StrictPriorityOrder",
+					&strict_priority_order))
+		strict_priority_order = false;
 	if (!l_dbus_register_interface(dbus_get_bus(), IWD_NETWORK_INTERFACE,
 					setup_network_interface, NULL, false))
 		l_error("Unable to register %s interface",

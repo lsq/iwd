@@ -41,7 +41,31 @@ struct known_network {
 	char *last_connected;
 	bool hidden;
 	bool autoconnect;
+	int32_t priority;
 };
+
+static void update_priority(void *data, struct l_dbus_message_iter *variant)
+{
+	struct known_network *network = data;
+	int32_t value;
+
+	if (!l_dbus_message_iter_get_variant(variant, "i", &value)) {
+		network->priority = 0;
+		return;
+	}
+
+	network->priority = value;
+}
+
+static const char *get_priority_tostr(const void *data)
+{
+	const struct known_network *network = data;
+	static char buf[12];
+
+	snprintf(buf, sizeof(buf), "%d", network->priority);
+
+	return buf;
+}
 
 static const char *format_iso8601(const char *time_str, const char *format)
 {
@@ -168,6 +192,8 @@ static const struct proxy_interface_property known_network_properties[] = {
 	{ "AutoConnect",       "b", update_autoconnect, get_autoconnect_tostr,
 		true, properties_builder_append_yes_no_variant,
 		properties_yes_no_opts },
+	{ "Priority",          "i", update_priority, get_priority_tostr,
+	true, properties_builder_append_int_variant },
 	{ },
 };
 
